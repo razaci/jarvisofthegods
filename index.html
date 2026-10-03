@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Jarvis</title>
+<style>
+  :root {
+    --ink: #d7e7ff;
+    --dim: #7f97b8;
+    --line: rgba(90, 160, 255, 0.35);
+    --glow: #3d8bff;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(ellipse at 50% 40%, #102033 0%, #070b12 62%);
+    color: var(--ink);
+    font: 16px/1.45 "Segoe UI", system-ui, sans-serif;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    min-height: 100%;
+  }
+  header, footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 22px;
+    color: var(--dim);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-size: 12px;
+  }
+  main {
+    display: grid;
+    grid-template-columns: 280px 1fr 280px;
+    gap: 18px;
+    padding: 0 22px 12px;
+    min-height: 0;
+  }
+  .panel {
+    border: 1px solid var(--line);
+    background: rgba(6, 12, 22, 0.55);
+    padding: 14px;
+    overflow: auto;
+    min-height: 0;
+  }
+  h1 {
+    margin: 0 0 8px;
+    font-weight: 600;
+    letter-spacing: 0.28em;
+    font-size: 14px;
+    color: #9ec4ff;
+  }
+  .core {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+  }
+  .ring {
+    width: min(42vh, 320px);
+    height: min(42vh, 320px);
+    border-radius: 50%;
+    border: 1px solid var(--line);
+    box-shadow: 0 0 40px rgba(61, 139, 255, 0.18), inset 0 0 40px rgba(61, 139, 255, 0.12);
+    display: grid;
+    place-items: center;
+    position: relative;
+    transition: transform 0.12s linear, box-shadow 0.2s;
+  }
+  .ring.live {
+    box-shadow: 0 0 60px rgba(61, 139, 255, 0.45), inset 0 0 50px rgba(61, 139, 255, 0.25);
+  }
+  .ring span {
+    font-size: 22px;
+    letter-spacing: 0.4em;
+    padding-left: 0.4em;
+  }
+  #log {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 100%;
+  }
+  .msg { white-space: pre-wrap; }
+  .msg b { color: #9ec4ff; font-weight: 600; }
+  form { display: flex; gap: 8px; }
+  input, button, select {
+    background: #0c1524;
+    color: var(--ink);
+    border: 1px solid var(--line);
+    padding: 10px 12px;
+    font: inherit;
+  }
+  input { flex: 1; }
+  button { cursor: pointer; letter-spacing: 0.08em; text-transform: uppercase; font-size: 13px; }
+  button.on { border-color: #7eb6ff; color: #fff; }
+  label { display: block; margin: 10px 0 4px; color: var(--dim); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .hint { color: var(--dim); font-size: 13px; }
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+    .side { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div id="clock">--:--:--</div>
+  <div>Jarvis · local page</div>
+  <div id="status">idle</div>
+</header>
+<main>
+  <section class="panel side">
+    <h1>Commands</h1>
+    <p class="hint">time · date · weather · weather in Seattle · wiki python · search cats · youtube lofi · ip · help</p>
+    <p class="hint">Chat goes to LM Studio at /v1/chat/completions. In the Developer tab, start the server and turn on CORS. Load a model first, then press Connect.</p>
+    <label for="city">City</label>
+    <input id="city" value="Spokane" />
+    <label for="llm">LM Studio base URL</label>
+    <input id="llm" value="http://127.0.0.1:1234/v1" />
+    <label for="model">Loaded model</label>
+    <select id="model"></select>
+    <button type="button" id="connect">Connect LM Studio</button>
+    <p class="hint" id="lm-state">not connected</p>
+  </section>
+  <section class="panel core">
+    <div class="ring" id="ring"><span>JARVIS</span></div>
+    <div id="heard" class="hint">Say a command, or type it.</div>
+    <form id="form">
+      <input id="q" autocomplete="off" placeholder="weather, wiki, search, or a question" />
+      <button type="submit">Send</button>
+      <button type="button" id="mic">Mic</button>
+    </form>
+  </section>
+  <section class="panel">
+    <h1>Log</h1>
+    <div id="log"></div>
+  </section>
+</main>
+<footer>
+  <div>Open in Chrome or Edge</div>
+  <div id="voice-state">LM Studio offline</div>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id);
+const logEl = $("log");
+const ring = $("ring");
+const history = [];
+let recog = null;
+let listening = false;
+
+function tick() {
+  $("clock").textContent = new Date().toLocaleTimeString();
+}
+setInterval(tick, 1000);
+tick();
+
+function loadSettings() {
+  for (const id of ["city", "llm"]) {
+    const saved = localStorage.getItem("jarvis." + id);
+    if (saved) $(id).value = saved;
+    $(id).addEventListener("change", () => localStorage.setItem("jarvis." + id, $(id).value.trim()));
+  }
+  const savedModel = localStorage.getItem("jarvis.model");
+  if (savedModel) {
+    const opt = document.createElement("option");
+    opt.value = savedModel;
+    opt.textContent = savedModel;
+    $("model").appendChild(opt);
+  }
+}
+loadSettings();
+
+function lmBase() {
+  return $("llm").value.trim().replace(/\/$/, "");
+}
+
+async function connectLm() {
+  $("lm-state").textContent = "contacting " + lmBase();
+  $("voice-state").textContent = "LM Studio connecting";
+  let res;
+  try {
+    res = await fetch(lmBase() + "/models", { headers: { Authorization: "Bearer lm-studio" } });
+  } catch (err) {
+    const msg = "Cannot reach LM Studio. Start the local server on port 1234 and enable CORS. " + err.message;
+    $("lm-state").textContent = msg;
+    $("voice-state").textContent = "LM Studio offline";
+    return;
+  }
+  if (!res.ok) {
+    $("lm-state").textContent = "LM Studio HTTP " + res.status;
+    $("voice-state").textContent = "LM Studio error";
+    return;
+  }
+  const data = await res.json();
+  const models = (data.data || []).map((item) => item.id).filter(Boolean);
+  $("model").innerHTML = "";
+  if (!models.length) {
+    $("lm-state").textContent = "Server is up, but no model is loaded. Load one in LM Studio.";
+    $("voice-state").textContent = "LM Studio: no model";
+    return;
+  }
+  for (const id of models) {
+    const opt = document.createElement("option");
+    opt.value = id;
+    opt.textContent = id;
+    $("model").appendChild(opt);
+  }
+  const saved = localStorage.getItem("jarvis.model");
+  if (saved && models.includes(saved)) $("model").value = saved;
+  localStorage.setItem("jarvis.model", $("model").value);
+  $("lm-state").textContent = "connected · " + models.length + " model" + (models.length === 1 ? "" : "s");
+  $("voice-state").textContent = "LM Studio ready";
+}
+
+$("connect").addEventListener("click", connectLm);
+$("model").addEventListener("change", () => localStorage.setItem("jarvis.model", $("model").value));
+
+async function chat(prompt) {
+  const model = $("model").value.trim();
+  if (!model) throw new Error("Press Connect LM Studio after a model is loaded.");
+  const res = await fetch(lmBase() + "/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer lm-studio"
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.4,
+      max_tokens: 400,
+      stream: false,
+      messages: [
+        { role: "system", content: "You are Jarvis, a concise desktop assistant. Two short sentences unless asked for detail." },
+        ...history.slice(-8),
+        { role: "user", content: prompt }
+      ]
+    })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.error?.message || data.error || ("HTTP " + res.status);
+    throw new Error("LM Studio rejected the chat. " + detail);
+  }
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error("LM Studio returned an empty reply.");
+  return text.trim();
+}
+
+function log(who, text) {
+  const row = document.createElement("div");
+  row.className = "msg";
+  row.innerHTML = "<b>" + who + "</b> " + escapeHtml(text);
+  logEl.prepend(row);
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, (c) => ({ "&": "&", "<": "<", ">": ">" }[c]));
+}
+function speak(text) {
+  log("Jarvis", text);
+  $("heard").textContent = text;
+  if (!window.speechSynthesis) return;
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.rate = 1.05;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(utter);
+}
+
+async function getJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return res.json();
+}
+
+async function weather(city) {
+  const geo = await getJson("https://geocoding-api.open-meteo.com/v1/search?count=1&name=" + encodeURIComponent(city));
+  const hit = (geo.results || [])[0];
+  if (!hit) return "I could not find " + city + ".";
+  const wx = await getJson(
+    "https://api.open-meteo.com/v1/forecast?latitude=" + hit.latitude +
+    "&longitude=" + hit.longitude +
+    "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m" +
+    "&temperature_unit=fahrenheit&wind_speed_unit=mph"
+  );
+  const codes = { 0: "clear", 1: "mainly clear", 2: "partly cloudy", 3: "overcast", 45: "fog", 61: "rain", 63: "rain", 71: "snow", 80: "showers", 95: "thunderstorm" };
+  const cur = wx.current;
+  const place = [hit.name, hit.admin1].filter(Boolean).join(", ");
+  return place + ": " + cur.temperature_2m + "°F, feels like " + cur.apparent_temperature +
+    "°F, " + (codes[cur.weather_code] || "mixed") + ", wind " + cur.wind_speed_10m + " mph.";
+}
+
+async function wiki(topic) {
+  const data = await getJson("https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(topic.replace(/ /g, "_")));
+  return data.extract || ("No Wikipedia summary for " + topic + ".");
+}
+
+async function handle(raw) {
+  const q = raw.trim();
+  const lower = q.toLowerCase();
+  if (!q) return;
+  log("You", q);
+  if (lower === "help" || lower === "commands") {
+    speak("Try time, date, weather, wiki, search, youtube, or ip. Other questions go to the language model.");
+    return;
+  }
+  if (lower.includes("time") && !lower.includes("timer")) {
+    speak("It is " + new Date().toLocaleTimeString());
+    return;
+  }
+  if (lower === "date" || lower.includes("what day") || lower.includes("what's the date")) {
+    speak("Today is " + new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" }));
+    return;
+  }
+  if (lower === "ip" || lower.includes("ip address")) {
+    const data = await getJson("https://api64.ipify.org?format=json");
+    speak("Your public IP is " + data.ip + ".");
+    return;
+  }
+  if (lower.includes("weather")) {
+    const city = lower.replace(/.*weather(?:\s+in|\s+for)?/, "").trim() || $("city").value.trim() || "Spokane";
+    speak(await weather(city));
+    return;
+  }
+  if (lower.startsWith("wiki ") || lower.includes("wikipedia")) {
+    const topic = lower.replace(/^(wiki|wikipedia|search wikipedia)\s+/, "").trim();
+    speak(await wiki(topic || "Jarvis"));
+    return;
+  }
+  if (lower.includes("youtube")) {
+    const topic = lower.replace(/.*youtube\s*/, "").trim() || "lofi";
+    window.open("https://www.youtube.com/results?search_query=" + encodeURIComponent(topic), "_blank");
+    speak("Opening YouTube for " + topic + ".");
+    return;
+  }
+  if (lower.startsWith("search ") || lower.startsWith("google ") || lower.includes("search google")) {
+    const topic = lower.replace(/^(search google|search|google)\s+/, "").trim();
+    window.open("https://www.google.com/search?q=" + encodeURIComponent(topic), "_blank");
+    speak("Searching for " + topic + ".");
+    return;
+  }
+  if (lower.startsWith("open ")) {
+    speak("This page cannot launch desktop apps. Use search or youtube, or the Python build for Notepad and other programs.");
+    return;
+  }
+  $("status").textContent = "thinking";
+  const reply = await chat(q);
+  history.push({ role: "user", content: q }, { role: "assistant", content: reply });
+  speak(reply);
+  $("status").textContent = listening ? "listening" : "idle";
+}
+
+$("form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = $("q").value;
+  $("q").value = "";
+  try { await handle(text); }
+  catch (err) { speak(String(err.message || err)); }
+});
+
+function setupMic() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    $("voice-state").textContent = "mic needs Chrome or Edge";
+    $("mic").disabled = true;
+    return;
+  }
+  recog = new SR();
+  recog.lang = "en-US";
+  recog.continuous = true;
+  recog.interimResults = false;
+  recog.onresult = (event) => {
+    const text = event.results[event.results.length - 1][0].transcript;
+    handle(text).catch((err) => speak(String(err.message || err)));
+  };
+  recog.onerror = (event) => {
+    $("status").textContent = event.error;
+  };
+  recog.onend = () => {
+    if (listening) recog.start();
+  };
+}
+setupMic();
+
+$("mic").addEventListener("click", () => {
+  if (!recog) return;
+  listening = !listening;
+  $("mic").classList.toggle("on", listening);
+  ring.classList.toggle("live", listening);
+  $("status").textContent = listening ? "listening" : "idle";
+  if (listening) recog.start();
+  else recog.stop();
+});
+</script>
+</body>
+</html>
